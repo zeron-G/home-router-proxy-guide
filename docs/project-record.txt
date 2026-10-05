@@ -1,0 +1,431 @@
+家庭路由器代理项目完整记录（脱敏版）
+实机：小米 BE3600 2.5G RD15，原厂 1.0.87
+记录日期：2026-10-06
+
+
+============================================================
+README.md
+============================================================
+
+# 家庭路由器代理实录：小米 BE3600 2.5G / RD15
+
+> 作者：zeron-G · 实机记录日期：2026-10-05 至 2026-10-06
+
+在原厂固件 1.0.87、已经取得 root SSH 的小米 BE3600 2.5G 上安装 ShellCrash + Mihomo，让连接这台路由器的设备按规则分流：国内直连，国外代理，常用 AI 服务走美国节点，永劫无间 Steam 版相关域名直连。
+
+这是一次实际部署和排障的记录。包含成功的步骤，也记录内存压力导致管理连接中断的过程和未验证的部分。版本、补丁、内存参数只对应这一台实机的状态，照搬前要检查自己的设备。
+
+## 从哪里读
+
+| 文档 | 内容 |
+|---|---|
+| [安装和架构](docs/01-installation.md) | 硬件检查、备份、ShellCrash、ARMv7 内核、TPROXY 扩展、自启动 |
+| [分流与面板](docs/02-routing-and-dashboard.md) | 一次性订阅、港日美节点、AI 美国、Yacd 怎么选节点 |
+| [掉线与恢复](docs/03-troubleshooting.md) | 内存压力、procd 环境、SSH 持久化、回退方法 |
+| [永劫无间直连](docs/04-naraka-direct.md) | Steam 版规则、真实 DNS、规则验证与游戏实测边界 |
+| [验证记录](docs/05-verification.md) | 实际做过的检查、结果和待确认事项 |
+| [项目完整文本](docs/project-record.txt) | 上述教程合并成一个 UTF-8 文本文件 |
+| [配置模板](examples/config.example.yaml) | 已去掉真实订阅、节点凭据和面板密钥 |
+
+## 当前方案
+
+- ShellCrash 1.9.4release；Mihomo Meta v1.19.28，ARMv7 UPX 版本。
+- 原厂固件不改刷 OpenWrt；持久化目录为 `/data/ShellCrash`。
+- TCP / UDP 透明代理用 TPROXY；DNS 用 fake-IP，国内和游戏域名有例外。
+- 保留香港、日本、美国共 54 个节点；自动测速只用三条代表节点。
+- `AI 美国` 单独选择美国节点；普通国外流量使用 `代理` 组。
+- 一次性订阅已缓存为文件，不进行重复 HTTP 订阅更新。
+- 本实例 `GOMEMLIMIT=12MiB`、`GOGC=30`；它们是调优参数，RSS 实测仍接近 49 MiB。
+
+家用客户端的请求需要经过这台路由器。连到上级路由器的 Wi-Fi、开启手机蜂窝回退、客户端另开 VPN 或使用其他 DNS，都会让检查结果与预期不同。
+
+## 当前验证边界
+
+已验证 SSH、面板认证、TCP 透明分流、AI 规则与美国出口、DNS 例外、自启动和一次正常重启恢复。永劫无间相关域名的直连规则已加载；主人随后确认游戏正常，原先的问题是没有登录，要求停止继续排查。没有做长期满载稳定性测试，也没有采集完整游戏对局遥测。
+
+## 隐私与来源
+
+仓库只发布脱敏教程、配置模板和本地规则编辑工具。真实订阅、节点密码、SSH / Wi-Fi / 面板密钥、备份包和会话令牌都保留在私人运行环境。模板中的网关和网段是教程示例，使用前按自己的网络修改。
+
+上游软件和规则数据保持各自的许可证，本库不分发内核二进制或论坛 PDF。原始参考见各文档及 [来源清单](docs/SOURCES.md)。
+
+============================================================
+docs/01-installation.md
+============================================================
+
+# 安装、适配和持久化
+
+> 作者：zeron-G · 最后核对：2026-10-06
+
+## 实机前提
+
+机型是小米 BE3600 2.5G（RD15），原厂固件 1.0.87。主人先完成 root SSH 开启，安装工作从可登录 SSH 开始。论坛帖子和 PDF 是参考资料，不作为自动执行命令的授权。
+
+| 项目 | 实机读取结果 |
+|---|---|
+| 内核 / 架构 | Linux 5.4.213 / armv7l，32 位 ARM |
+| 系统 | OpenWrt 18.06-SNAPSHOT，ipq53xx_32，musl armhf |
+| iptables | 1.6.2，libxtables.so.12 |
+| 系统可见内存 | 180428 KiB，约 176 MiB |
+| `/data` | 19952 KiB 的持久化分区；完成部署后约 3976 KiB 可用 |
+| 临时文件 | `/tmp` 是内存文件系统，重启会丢失 |
+
+先通过 SSH 读取自己的情况，网关地址用实际值替换示例：
+
+```sh
+ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.0.1
+uname -a
+cat /etc/openwrt_release
+free
+df -k /data /tmp
+iptables --version
+ip addr
+ip route
+```
+
+不要根据商品标称内存判断剩余空间；以 `free` 的 MemAvailable 和实际进程 RSS 为准。
+
+## 先备份，暂不启动
+
+备份网络、防火墙、DHCP、SSH 配置及当前服务状态。备份内容可能包含 Wi-Fi 密码和 SSH 私钥，权限设为仅 root 可读，并另存到私人电脑。升级、回退前仍要做新备份。本库不提供这些私人备份。
+
+安装 ShellCrash 时先关闭自动启动，确认配置、内核和规则数据齐全以后再启动。不要让一个没有节点配置的默认服务抢先接管整个家庭网络。
+
+## ShellCrash 和内核
+
+本次采用 [ShellCrash 官方仓库](https://github.com/juewuy/ShellCrash) stable 安装包，得到 1.9.4release。先保存并检查官方安装脚本，再在 SSH 内运行，根据菜单把安装目录选为 `/data/ShellCrash`。可以在电脑上预下载，避免路由器临时目录同时堆积多个大文件。
+
+运行内核是 Mihomo Meta v1.19.28，Go 1.26.5，ARMv7 UPX 文件，来自 ShellCrash 官方 update 分支的 `bin/meta/clash-linux-armv7.upx`。持久化文件为 `/data/ShellCrash/CrashCore.upx`，`/tmp/ShellCrash/CrashCore` 是运行时链接。
+
+本次下载文件的校验值：
+
+| 文件 | 大小 / SHA-256 |
+|---|---|
+| ShellCrash stable 包 | `4f946031a0483ed528e266143d459075489cce6c3f8f2f4681f39ca6d7448681` |
+| ARMv7 UPX 内核 | 10185476 字节；`33d58f2103c674caaf12ac350cd351539102b6089fae0a3ce44b50fb36f86b64` |
+
+这些值记录本次获取的文件；stable / update 分支会更新，新下载不必与它们相同，但必须重新核对来源、架构和版本。
+
+规则数据使用小型 `Country.mmdb`、中国域名 `cn.mrs` 与 ShellCrash 的中国 IP 列表，减少资源占用。它们在本实例分别约 133 KB、535 KB、71 KB。不要把完整版巨型规则库直接塞进这个分区。
+
+## TPROXY 适配是本机的关键步骤
+
+内核支持 TPROXY，但原厂 iptables 用户态缺少 `libxt_TPROXY.so` 和 `libxt_socket.so`。本次从官方 OpenWrt 18.06.9 的 ARM Cortex-A7 `iptables-mod-tproxy` 1.6.2-3 包取出这两个扩展，先确认它们与系统 `libxtables.so.12` 的 ABI 匹配。
+
+扩展放在 `/data/ShellCrash/tools/iptables/`，同时在这个目录链接原厂已有扩展。为 ShellCrash 设置：
+
+```sh
+export XTABLES_LIBDIR=/data/ShellCrash/tools/iptables
+iptables -j TPROXY -h
+```
+
+只有输出含 `--on-port` 等 TPROXY 参数，才能说明用户态扩展已正确加载。不要整包覆盖原厂 iptables / libc，也不要只看到内核模块存在就认为适配完成。日后检查规则时也要带上 `XTABLES_LIBDIR`，否则会把缺少搜索路径误认为服务故障。
+
+本实例用 TPROXY 接管 LAN 和 IoT 子网的 TCP / UDP，入口端口为 7893，mark 7892（十六进制 0x1ed4），table 100 指向 local default。只覆盖明确的下游子网，不把上级路由器网段一并接管。`routing-mark: 7894` 用于内核自己的出站连接。
+
+原厂 `qca-nss-ecm` 会影响 bridge netfilter 参数。本次持久化修复让 `net.bridge.bridge-nf-call-iptables` 与 `ip6tables` 为 0；这属于本次实机适配，其他机型先确认拓扑和转发行为再决定是否需要。
+
+## 服务与启动链
+
+1. `/etc/init.d/shellcrash` 交给 procd 管理内核；持久化模板为 `/data/ShellCrash/starts/shellcrash.procd`。
+2. 两份服务定义显式传入 `GOMEMLIMIT=12MiB GOGC=30`，并读取扩展路径。
+3. `/data/shellcrash_init.sh` 等待 LAN 就绪、恢复主人已经启用的 SSH、重建运行环境及必要适配，再启动 ShellCrash。
+4. `firewall.ShellCrash.path` 指向上述持久化 hook，`enabled=1`。大小写必须与实际 UCI 节名一致。
+5. `/etc/rc.d/S99shellcrash` 存在；控制器就绪检查使用实际 LAN 绑定地址。
+
+本实例保留原 SSH host key 和 root 密码，关闭原脚本自动开 Telnet、自动改密码及删除原厂日志目录的行为。正常重启后验证了 SSH、服务、内存参数和防火墙恢复。未验证固件升级、恢复出厂或断电损坏后的恢复。
+
+## 配置部署顺序
+
+准备本地节点文件、规则数据、面板及 YAML → 备份现有配置 → 核对 YAML 字段和路径 → 让现有核心通过 API 重载 → 读取 `/configs`、`/rules`、`/proxies` → 从不设客户端代理的设备测试国内和国外网站。
+
+本机不能同时运行正常核心与另一个 `CrashCore -t` 来测试配置，额外进程会增加内存压力。使用本地 YAML 检查和现有核心 API 重载；必须运行内核测试时，先安排短暂停服窗口。
+
+============================================================
+docs/02-routing-and-dashboard.md
+============================================================
+
+# 订阅、分流和面板使用
+
+> 作者：zeron-G · 最后核对：2026-10-06
+
+## 一次性订阅为什么仍然能用
+
+主人提供的 Clash / Mihomo 订阅成功下载过一次。初始文件含 106 个真实 AnyTLS 节点，另外两个条目是流量 / 到期信息。后续再次获取返回 HTTP 403，主人明确说明这是服务商防转发的一次性链接机制。
+
+403 只说明这个 URL 不能重新下载，不能证明已经缓存的节点失效。本次把 provider 改成 `type: file`，使用路由器上的 `/data/ShellCrash/providers/subscription.yaml`，关闭订阅 HTTP 更新与全量健康检查。不要删除这个文件再去重新下载；在私人位置留一份备份。
+
+如果服务商以后变更节点、密码、端口或订阅到期，就需要主人重新取得配置文件，核对并替换缓存。缓存本身不能保证无限期有效。原始节点配置带 `skip-cert-verify: true`，本次没有悄悄改变服务商参数；公开示例不含这些凭据，示例使用正常证书校验。
+
+## 只留下香港、日本、美国
+
+原始 106 节点文件已私人备份，当前 provider 保留 54 个节点：香港 20、日本 18、美国 16。
+
+| 代理组 | 类型 | 用法 |
+|---|---|---|
+| `代理` | select | 普通国外流量，可以选 `自动选择` 或手动节点 |
+| `自动选择` | url-test | 只测港、日、美各一个代表节点，900 秒间隔、lazy 模式 |
+| `AI 美国` | select | 仅含 16 个美国节点，初始选 USA 01 |
+
+降低测速数量是为了减少这台低内存路由器的资源峰值。其他节点保留用于手选，但没有一次性并发测试全部节点。
+
+## 规则顺序
+
+```text
+永劫无间 / 网易游戏相关域名 → DIRECT
+AI 服务及相关登录 / 静态资源域名 → AI 美国
+局域网、私有地址 → DIRECT
+.cn、中国域名规则集、中国 IP → DIRECT
+其余 → 代理
+```
+
+最终 YAML 共 58 条规则，前 12 条为游戏相关 DIRECT。AI 规则覆盖 OpenAI / ChatGPT / Sora，Anthropic / Claude，x.ai / Grok，以及 Gemini / AI Studio、Copilot、Perplexity、Poe。为了覆盖 X 内的 Grok，X / Twitter 的相关域名也进入美国组，因此它们不会跟随普通代理组。
+
+普通域名规则存在覆盖范围的边界。网站可能更换登录或静态资源域名；遇到问题要看实际命中记录。完整列表在 [配置模板](../examples/config.example.yaml) 中。
+
+## DNS 与透明代理
+
+Mihomo DNS 在 1053 端口工作，ShellCrash 处理客户端 53 端口请求。国内解析使用国内 DNS，其他域名使用海外 DoH，fake-IP 采用示例网段 `28.0.0.0/8`；局域网、国内规则集与游戏域名返回真实地址。IPv6 在核心和 DNS 中关闭，本实例没有可用的上游全局 IPv6 路由。
+
+PC 测试时没有配置 HTTP / SOCKS 代理，仍能看到路由器核心处理国外请求，这是验证透明代理的一个证据。手机必须连接这台路由器的 Wi-Fi；本项目曾因连到另一台 Wi-Fi 而误判 ChatGPT 配置无效。
+
+## Yacd 面板怎么打开
+
+在这台路由器 Wi-Fi / LAN 下，浏览器打开：
+
+```text
+http://192.168.0.1:9999/ui/#/proxies
+```
+
+这是教程示例地址，实际以路由器 LAN 网关为准。初次连接后端时填写：主机为路由器网关、端口 `9999`、密钥为 YAML 的 `secret`，协议选择 HTTP。本库不公开实际密钥。控制器绑定 LAN，并要求密钥；测试中未认证请求返回 401，面板静态页返回 200。
+
+日常用法：
+
+1. 运行模式保持 `Rule / 规则`，这样国内、游戏和 AI 的规则才参与判断。
+2. 点开 `代理` 卡片，普通国外流量想自动选就点 `自动选择`；想固定就点一条香港、日本或美国节点。高亮的一项是当前选择。
+3. 点开 `AI 美国` 卡片，更换 ChatGPT / Claude / Grok 使用的美国节点。更换普通 `代理` 不会改变 AI 组。
+4. `延迟测速` 只测需要比较的少量节点；不要反复点击所有组全量测速。
+5. `连接` 页看应用域名、命中的规则与策略链。改策略后重开对应 App，让新连接采用新选择。
+
+选择 `Global / 全局` 会绕开上述分流安排，让游戏和国内网站也可能使用全局节点。需要暂时全直连时 `Direct / 直连` 可以作为诊断动作，测试后恢复 `Rule`。
+
+## 手机 AI 出现“地区不可用”
+
+先确认手机在目标 Wi-Fi、网关正确，并完全退出 App 再打开；同时查看连接页是否有该手机的新流量，相关域名是否命中 `AI 美国`。本次美国节点在电脑透明连接下返回美国出口，iOS / Android 状态接口也返回 normal，但这不等于所有手机账号和完整登录都已经验证。
+
+如果仍失败，手动换另一条美国节点，再看实际 App 域名、登录状态和报错。不要在没有手机流量证据时持续改路由器全局配置。
+
+============================================================
+docs/03-troubleshooting.md
+============================================================
+
+# 掉线、资源限制和恢复经验
+
+> 作者：zeron-G · 最后核对：2026-10-06
+
+## 实际发生了什么
+
+最初启动全部 106 个节点的健康检查和自动选择测试后，出现可用内存降至约 1 MiB、负载接近 15.8 的情况，随后 SSH 和管理请求中断，主人的已有 SSH 会话也掉线。设备后来恢复 / 重启，才继续排障。
+
+这些观察支持“内存和并发检查造成明显资源压力”的判断，但没有保存到足够的 OOM / panic 证据，不能把掉线的唯一原因说成已经证明。操作中让大量节点同时检查，是本次需要避免重复的失误。未写入 mtd、未刷固件、未恢复出厂。
+
+## 采取的修正
+
+- 订阅改用本地文件，停止一次性 URL 的重复更新。
+- 原节点文件备份；按主人要求缩减为香港、日本、美国 54 节点。
+- URLTest 只使用三个代表节点，lazy 模式，900 秒间隔。
+- 使用较小的中国规则库；平时日志等级保持 warning。
+- 两份 procd 服务定义均显式设置 `GOMEMLIMIT=12MiB GOGC=30`。
+- 检查真实核心 `/proc/<PID>/environ`，避免只改了交互式 shell 环境而服务没有继承。
+- 修复 SSH、自启动、iptables 扩展路径和控制器就绪地址，正常重启后重新检查。
+
+`GOMEMLIMIT` 是 Go 运行时软目标，不是整个进程的硬 RSS 上限，二进制映射等不在它的完整覆盖范围。2026-10-06 的一次检查中核心 RSS 为 50208 KiB（约 49 MiB），系统 MemAvailable 约 8988 KiB，仍然余量较小。降低 GOGC 也会增加垃圾回收工作；不能把这组参数当成通用最佳值。[Go 官方说明](https://pkg.go.dev/runtime#hdr-Environment_Variables)
+
+## 日常检查命令
+
+```sh
+uptime
+free
+df -k /data
+pidof CrashCore
+grep -E 'VmRSS|Threads' /proc/$(pidof CrashCore)/status
+tr '\0' '\n' </proc/$(pidof CrashCore)/environ | grep -E '^GOMEMLIMIT=|^GOGC='
+export XTABLES_LIBDIR=/data/ShellCrash/tools/iptables
+iptables-save | grep shellcrash
+ip rule show
+ip route show table 100
+uci -q get firewall.ShellCrash.path
+uci -q get firewall.ShellCrash.enabled
+```
+
+用 `iptables-save` 前设置扩展目录；不要只根据 `ps` 显示的巨大虚拟内存就判断 RSS。日志先短时间采集，再恢复 warning，不持续写入闪存。
+
+## SSH 断开时
+
+先判断 Wi-Fi、LAN 网关网页、SSH 端口是否还响应，确认电脑连接了目标路由器。保留时间、负载、内存、核心 PID 和日志，不盲目开启更多测试进程。
+
+本次在原厂网页管理权限仍可用时，参考主人提供的对应固件帖子恢复 SSH。相关历史漏洞与固件强绑定，帖子里的命令不能当通用恢复脚本。本库不附会话令牌、认证密码或可直接批量执行的漏洞脚本。
+
+如果连 LAN 管理也完全无响应，远程无法可靠发出重启；由主人给设备断电约十秒再上电，不按 Reset。正常重启、恢复出厂和刷机是不同操作，不能相互替代。
+
+## 回退分流配置
+
+修改前保留日期化备份，例如：
+
+```sh
+cp /data/ShellCrash/yamls/config.yaml /data/ShellCrash/backups/config-before-change.yaml
+chmod 600 /data/ShellCrash/backups/config-before-change.yaml
+```
+
+配置错误时恢复最近可用的 YAML，并通过核心 API 或 ShellCrash 管理命令重载。通过 API 操作需要认证密钥，不要把密钥写进 Git、截图或公开命令历史。
+
+必要时从 LAN SSH 执行 `/data/ShellCrash/start.sh stop` 停止代理并撤销其规则，再检查普通上网是否恢复；这会中断正在使用代理的连接。在本次原厂网络配置不变的部署方式下，可用来隔离代理层故障。未针对所有异常状态逐项验证停止后的恢复，所以实际仍需查看防火墙和 DNS 状态。
+
+不要执行无目标的 `iptables -F`、删除网络配置、启动第二个核心做 `-t`，也不要为了修一个游戏把全屋全部 UDP 都改为直连。
+
+## 升级与长期限制
+
+固件升级可能重置 SSH、启动 hook 或用户态 ABI；本次只验证一次正常重启。升级前下载私人备份，记录版本、文件校验、实际路由，并安排恢复窗口。
+
+这台设备在代理工作时剩余内存有限，尚无连续多日、全屋下载和游戏同时运行的稳定性证据。出现再次掉线或明显延迟时，先检查资源和实际连接，再决定减少功能或把代理迁到资源更多的设备。
+
+============================================================
+docs/04-naraka-direct.md
+============================================================
+
+# 永劫无间 Steam 版直连
+
+> 作者：zeron-G · 配置变更：2026-10-06
+
+主人最初怀疑代理影响永劫无间，并确认是 Steam 版。本次按当时的直连要求把游戏及相关网易服务域名放在规则列表顶部，目标策略为 DIRECT，同时加入 DNS fake-IP 例外。随后主人确认游戏正常，原先的问题是没有登录，并要求不用继续修复。停止进一步排查，已有直连规则保留；不能将游戏恢复归因于这次规则修改。
+
+## 当前域名列表
+
+```text
+yjwujian.cn
+narakathegame.com
+narakabladepoint.com
+neteasegames.com
+netease.com
+netease.im
+easebar.com
+163.com
+126.net
+127.net
+nease.net
+static163.net
+```
+
+这是本次采用的排障覆盖集，不是官方承诺的完整游戏服务器名单。`yjwujian.cn` 也出现在 [v2fly 的网易域名清单](https://github.com/v2fly/domain-list-community/blob/master/data/netease) 中；其他相关域名用于覆盖发行商登录、站点及资源服务。网易 / 163 的后缀较广，因此这些服务也会走直连。
+
+每个域名对应：
+
+```yaml
+rules:
+  - DOMAIN-SUFFIX,yjwujian.cn,DIRECT
+  # 游戏例外必须放在 AI / 中国规则 / MATCH 之前
+dns:
+  fake-ip-filter:
+    - '+.yjwujian.cn'
+```
+
+完整 12 条规则和 DNS 例外在配置模板里。规则由上到下匹配，使用 `Rule` 模式才生效。[Mihomo 规则说明](https://wiki.metacubex.one/config/rules/)
+
+## 本次实施记录
+
+原配置先备份为 `/data/ShellCrash/backups/config-before-naraka-20261006.yaml`，权限 600。新配置写入持久化 YAML，现有核心 API 重载返回 204；读取 `/configs` 与 `/rules` 确认模式为 rule，前 12 条都是 DIRECT，总规则数 58。
+
+之后查询 `www.narakathegame.com`、`www.yjwujian.cn`，两者都有真实 DNS 答复，没有返回 fake-IP。通过不设置客户端代理的电脑访问游戏官网得到 HTTP 200，核心日志明确显示 `narakathegame.com` 命中 DIRECT。
+
+这一步完成的是“相关域名的直连规则已经加载并命中”。网站请求只能验证域名路径，不能代替 Steam 游戏进入大厅、匹配或对局测试；观察窗口没有捕获到实际游戏会话。
+
+## 在另一台机器上如何编辑
+
+本库提供只编辑本地 YAML 的工具，不会登录路由器，也不会下载订阅：
+
+```sh
+python -m pip install -r requirements.txt
+python scripts/apply-naraka-direct.py original.yaml updated.yaml
+```
+
+输入和输出必须是不同文件，输出存在时工具会拒绝覆盖。脚本保留其他规则 / 字段，只把这些域名的规则移到顶部并设置 DIRECT，补齐 DNS 例外；重复处理不会增加重复项。自行审阅 diff、备份后再部署到路由器。
+
+## 玩家如何验证
+
+1. 连接目标路由器 LAN / Wi-Fi，退出游戏；客户端若另开了 VPN 或本地 Clash，先确认不会覆盖路由器测试。
+2. Windows 可执行 `ipconfig /flushdns` 清除旧解析，再重新打开 Steam 版游戏。
+3. 尝试进入大厅、匹配并完成一局；记录连接错误、卡住阶段、延迟。
+4. 面板连接页 / 短时 info 日志查看游戏域名和策略链；应该命中 DIRECT。
+5. 如果仍有游戏流量命中普通代理，结合游戏进程的连接、实际域名或服务器地址补精准规则，再重复验证。
+
+路由器看不到 PC 上的进程归属。给路由器写 `PROCESS-NAME,NarakaBladepoint.exe,DIRECT` 不能可靠区分转发的游戏流量。纯 IP / UDP 游戏会话、Steam 平台登录和新 CDN 也可能不匹配这份域名列表。需要观察实际流量后处理，避免猜测端口范围或把整台电脑永久全直连。
+
+## 验证状态
+
+规则加载、DNS 例外和官网 DIRECT 请求已检查。主人反馈游戏正常，先前问题为未登录，已停止继续排查；没有采集完整对局遥测，也不把正常状态归功于代理配置修改。
+
+============================================================
+docs/05-verification.md
+============================================================
+
+# 实机验证与交接边界
+
+> 记录者：Codex（按主人要求整理）· 最后核对：2026-10-06
+
+以下包含部署期间的检查与本次配置检查。历史记录不是实时监控，HTTP 状态正常也不等于完整账号登录、游戏对局或长期稳定性已验证。
+
+| 检查 | 观察结果 | 可以确认的范围 |
+|---|---|---|
+| root SSH | 实际连接成功 | 当时管理通道可用 |
+| 内核 | Mihomo Meta v1.19.28、ARMv7；进程运行 | 可执行文件架构与版本 |
+| procd 环境 | 实际进程有 12MiB / GOGC 30 | 调优设置已传入服务 |
+| 内存 / 闪存 | RSS 50208 KiB，MemAvailable 一次约 8988 KiB；`/data` 可用 3976 KiB | 单次读数，余量有限 |
+| TPROXY | 扩展可加载；mark 0x1ed4 查 table 100 | 透明代理基础规则存在 |
+| 无客户端代理的 PC | 百度 200、Google 204、YouTube / Wikipedia 200；核心看到国外请求 | 这些请求经过透明分流 |
+| 国内 / 国外 DNS | 国内真实地址，国外 fake-IP；国外 AAAA 测试为零答复 | 当时的 DNS 分流 |
+| AI 出口 | ChatGPT / Claude / Grok trace 200、loc=US | 对应请求出口被站点识别为美国 |
+| 手机接口 | iOS / Android ChatGPT 状态接口 200、normal | 状态接口可达；完整登录未覆盖 |
+| AI 命中 | OpenAI / Claude / Grok 请求进入 `AI 美国` / USA 01 | 对应域名规则生效 |
+| 面板认证 | 无认证 API 401，UI 页 200 | 面板可访问且 API 要求密钥 |
+| 一次性订阅 | 首次下载成功，重复下载 403；文件 provider 可加载 | 不应将重复下载失败等同节点失效 |
+| 节点筛选 | 54 条：香港 20 / 日本 18 / 美国 16 | 节点文件内容，未全量压测 |
+| 正常重启 | SSH host key、密码、服务环境、防火墙恢复 | 一次正常重启恢复 |
+| 永劫无间 | rule 模式，58 条规则，前 12 条 DIRECT；官网真实 DNS / 200 / DIRECT；主人确认游戏正常、原先未登录 | 官网路径和用户反馈已确认；未采集完整对局遥测 |
+
+## 历史事件
+
+1. 主人先完成 root SSH，随后安装 ShellCrash、ARMv7 Mihomo 与本地面板。
+2. 订阅导入后，全量健康检查期间出现明显资源压力和管理掉线；恢复后降低检查数量并修正服务内存环境。
+3. 一次性链接 403 由主人确认属于服务商机制，改为文件缓存并保留原节点备份。
+4. 手机 ChatGPT 曾提示地区不可用；一度确认是手机连错 Wi-Fi。之后按主人要求统一 AI 美国组，电脑出口与手机服务接口检查通过。
+5. 普通节点范围缩减为港、日、美；AI 美国单独选择。
+6. 本次按 Steam 版永劫无间增加相关域名 DIRECT 和真实 DNS 例外，配置重载成功。主人随后确认问题是未登录、游戏正常，并要求停止继续修复；不能归因为代理故障。
+7. 主人要求发布教程并给 EVAspace 的其他 agent 留下详细记录，所有 Git 内容先去掉实际凭据。
+
+## 仍然待确认
+
+- 永劫无间没有采集完整对局遥测；主人已确认正常并取消继续修复，不作为待办任务。
+- 手机 ChatGPT 的完整账号登录和实际发消息；状态接口测试不替代用户操作。
+- 所有 54 个节点的稳定性与当前可用性；只降低并发检查，没有证明全部永久可用。
+- 长期多人满载、下载和游戏同时运行的内存 / 延迟表现。
+- 固件升级、恢复出厂、意外断电与异常核心停止后的恢复行为。
+
+后续 agent 应先读取当前配置和真实运行状态，再修改；不要把本文日期化结果当成永远成立的事实。
+
+============================================================
+docs/SOURCES.md
+============================================================
+
+# 来源与使用方式
+
+- [ShellCrash 官方项目](https://github.com/juewuy/ShellCrash)：安装器、服务管理、内核与面板获取入口。
+- [ShellCrash stable 安装包](https://raw.githubusercontent.com/juewuy/ShellCrash/stable/ShellCrash.tar.gz)：本次采用的源，版本和文件校验记录在安装文档。
+- [ShellCrash update 分支](https://github.com/juewuy/ShellCrash/tree/update)：本次 ARMv7 UPX 内核来源。
+- [Mihomo 官方项目](https://github.com/MetaCubeX/mihomo)：内核项目。
+- [Mihomo 规则](https://wiki.metacubex.one/config/rules/)、[DNS](https://wiki.metacubex.one/config/dns/)、[代理集合](https://wiki.metacubex.one/config/proxy-providers/)：配置语法核对。
+- [Go runtime 环境变量](https://pkg.go.dev/runtime#hdr-Environment_Variables)：GOMEMLIMIT 软目标和 GOGC 的含义。
+- [OpenWrt 18.06.9 官方下载目录](https://downloads.openwrt.org/releases/18.06.9/)：本次补齐匹配 iptables ABI 的扩展来源。
+- [v2fly 网易域名清单](https://github.com/v2fly/domain-list-community/blob/master/data/netease)：游戏及网易域名核对来源之一，不作为完整服务器列表。
+- [论坛参考一](https://www.right.com.cn/forum/thread-8485993-1-1.html)、[对应 RD15 固件参考](https://www.right.com.cn/forum/forum.php?mod=viewthread&tid=8321180)：主人提供帖子及其 PDF，用于理解 SSH / 原厂固件操作背景。本库不重新分发帖子全文或 PDF。
+
+本教程的大部分部署参数和故障经过来自本次实机命令、配置读回、HTTP / DNS 检查及主人反馈。把“现场观察”“技术判断”“尚待实测”分开记录，避免将第三方资料里的步骤写成自己已经完成的操作。

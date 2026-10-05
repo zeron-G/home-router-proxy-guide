@@ -1,0 +1,179 @@
+# 示例：填写私人的节点文件及随机密钥，核对网关与规则数据路径后才能部署。
+mixed-port: 7890
+redir-port: 7892
+tproxy-port: 7893
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: warning
+ipv6: false
+external-controller: 192.168.0.1:9999
+external-ui: ui
+secret: REPLACE_WITH_RANDOM_SECRET_BEFORE_USE
+routing-mark: 7894
+find-process-mode: 'off'
+unified-delay: true
+tcp-concurrent: true
+profile:
+  store-selected: true
+  store-fake-ip: false
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  sniff:
+    TLS:
+      ports:
+      - 443
+      - 8443
+    HTTP:
+      ports:
+      - 80
+      - 8080-8880
+      override-destination: true
+    QUIC:
+      ports:
+      - 443
+      - 8443
+  skip-domain:
+  - Mijia Cloud
+  - +.lan
+  - +.local
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  use-hosts: true
+  use-system-hosts: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 28.0.0.0/8
+  fake-ip-filter:
+  - +.lan
+  - +.local
+  - +.miwifi.com
+  - +.ntp.org
+  - time.*.com
+  - rule-set:cn
+  - +.yjwujian.cn
+  - +.narakathegame.com
+  - +.narakabladepoint.com
+  - +.neteasegames.com
+  - +.netease.com
+  - +.netease.im
+  - +.easebar.com
+  - +.163.com
+  - +.126.net
+  - +.127.net
+  - +.nease.net
+  - +.static163.net
+  respect-rules: true
+  default-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  proxy-server-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  direct-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29
+  nameserver-policy:
+    rule-set:cn:
+    - 223.5.5.5
+    - 119.29.29.29
+    +.cn:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+  - https://1.1.1.1/dns-query
+  - https://dns.google/dns-query
+proxy-providers:
+  机场订阅:
+    type: file
+    path: ./providers/subscription.yaml
+    health-check:
+      enable: false
+proxy-groups:
+- name: 代理
+  type: select
+  proxies:
+  - 自动选择
+  use:
+  - 机场订阅
+- name: 自动选择
+  type: url-test
+  use:
+  - 机场订阅
+  filter: ^(HK|JP|US) 01$
+  url: https://www.gstatic.com/generate_204
+  interval: 900
+  tolerance: 50
+  lazy: true
+- name: AI 美国
+  type: select
+  use:
+  - 机场订阅
+  filter: '^US '
+rule-providers:
+  cn:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./ruleset/cn.mrs
+rules:
+- DOMAIN-SUFFIX,yjwujian.cn,DIRECT
+- DOMAIN-SUFFIX,narakathegame.com,DIRECT
+- DOMAIN-SUFFIX,narakabladepoint.com,DIRECT
+- DOMAIN-SUFFIX,neteasegames.com,DIRECT
+- DOMAIN-SUFFIX,netease.com,DIRECT
+- DOMAIN-SUFFIX,netease.im,DIRECT
+- DOMAIN-SUFFIX,easebar.com,DIRECT
+- DOMAIN-SUFFIX,163.com,DIRECT
+- DOMAIN-SUFFIX,126.net,DIRECT
+- DOMAIN-SUFFIX,127.net,DIRECT
+- DOMAIN-SUFFIX,nease.net,DIRECT
+- DOMAIN-SUFFIX,static163.net,DIRECT
+- DOMAIN-SUFFIX,oaistatsig.com,AI 美国
+- DOMAIN-SUFFIX,sora.com,AI 美国
+- DOMAIN-SUFFIX,claude.com,AI 美国
+- DOMAIN-SUFFIX,claude.dev,AI 美国
+- DOMAIN-SUFFIX,clau.de,AI 美国
+- DOMAIN-SUFFIX,gemini.google.com,AI 美国
+- DOMAIN-SUFFIX,gemini.google,AI 美国
+- DOMAIN-SUFFIX,aistudio.google.com,AI 美国
+- DOMAIN-SUFFIX,ai.google.dev,AI 美国
+- DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI 美国
+- DOMAIN-SUFFIX,copilot.microsoft.com,AI 美国
+- DOMAIN-SUFFIX,copilot.cloud.microsoft,AI 美国
+- DOMAIN-SUFFIX,githubcopilot.com,AI 美国
+- DOMAIN-SUFFIX,perplexity.ai,AI 美国
+- DOMAIN-SUFFIX,perplexity.com,AI 美国
+- DOMAIN-SUFFIX,pplx.ai,AI 美国
+- DOMAIN-SUFFIX,poe.com,AI 美国
+- DOMAIN-SUFFIX,poecdn.net,AI 美国
+- DOMAIN-SUFFIX,openai.com,AI 美国
+- DOMAIN-SUFFIX,chatgpt.com,AI 美国
+- DOMAIN-SUFFIX,chat.com,AI 美国
+- DOMAIN-SUFFIX,oaistatic.com,AI 美国
+- DOMAIN-SUFFIX,oaiusercontent.com,AI 美国
+- DOMAIN-SUFFIX,claude.ai,AI 美国
+- DOMAIN-SUFFIX,anthropic.com,AI 美国
+- DOMAIN-SUFFIX,claudeusercontent.com,AI 美国
+- DOMAIN-SUFFIX,grok.com,AI 美国
+- DOMAIN-SUFFIX,x.ai,AI 美国
+- DOMAIN-SUFFIX,x.com,AI 美国
+- DOMAIN-SUFFIX,twitter.com,AI 美国
+- DOMAIN-SUFFIX,twimg.com,AI 美国
+- DOMAIN-SUFFIX,t.co,AI 美国
+- DOMAIN-SUFFIX,lan,DIRECT
+- DOMAIN-SUFFIX,local,DIRECT
+- IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+- IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+- IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+- IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+- IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+- DOMAIN-SUFFIX,cn,DIRECT
+- RULE-SET,cn,DIRECT
+- GEOIP,CN,DIRECT
+- MATCH,代理

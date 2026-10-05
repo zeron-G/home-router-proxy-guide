@@ -1,0 +1,26 @@
+# 不可连接的演示节点；实际节点配置仅保留在私人设备上。
+proxies:
+- name: HK 01
+  type: anytls
+  server: hk.example.invalid
+  port: 443
+  password: REPLACE_WITH_PRIVATE_NODE_PASSWORD
+  sni: hk.example.invalid
+  skip-cert-verify: false
+  udp: true
+- name: JP 01
+  type: anytls
+  server: jp.example.invalid
+  port: 443
+  password: REPLACE_WITH_PRIVATE_NODE_PASSWORD
+  sni: jp.example.invalid
+  skip-cert-verify: false
+  udp: true
+- name: US 01
+  type: anytls
+  server: us.example.invalid
+  port: 443
+  password: REPLACE_WITH_PRIVATE_NODE_PASSWORD
+  sni: us.example.invalid
+  skip-cert-verify: false
+  udp: true

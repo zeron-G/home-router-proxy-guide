@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+work/
+private/
+providers/
+backups/
+subscription.yaml
+config.yaml
+*.tgz
+*.tar.gz
+*.upx
+*.ipk
+*.key
+.env
+dashboard-secret.txt
+subscription.url
