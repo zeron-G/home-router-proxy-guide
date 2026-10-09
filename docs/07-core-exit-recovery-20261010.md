@@ -48,3 +48,15 @@
 运行内存余量仍约 15 MiB。此次修复处理的是核心退出后的恢复和规则清理，没有解决核心所有退出原因，也没有扩大这台设备的物理内存。接手 agent 应先读取当前状态与新日志，不能把短时通过等同于永久稳定。
 
 procd 参数参考：[OpenWrt 18.06 procd shell 接口](https://raw.githubusercontent.com/openwrt/openwrt/openwrt-18.06/package/system/procd/files/procd.sh)。OOM 政策参考：[Linux panic_on_oom](https://docs.kernel.org/admin-guide/sysctl/vm.html#panic-on-oom)。本机实际读回及上述受控测试是本次恢复机制的验证依据。
+
+## 同日补查：确认系统有 OOM 杀进程记录
+
+主人追问是否是内存耗尽后，再进行只读检查，发现 `/proc/vmstat` 中 **`oom_kill 12`**。本次 boot ID 仍相同，说明本次启动以来已经发生过 OOM 杀进程，不再仅是“内存不足的风险推测”。Linux 5.4 的该计数在 OOM killer 处理受害进程时增加；普通的受控 SIGKILL 不会增加此计数。
+
+补查时可用内存多次只有约 4.5～7.2 MiB，核心 RSS 约 42 MiB，内核不可回收 slab 约 56～58 MiB，无 swap。核心 PID 与受控恢复后的进程相同，监督日志没有新的自然退出记录；两次计数检查仍为 12。
+
+该计数不能单独说明被杀的是哪个 PID，也没有事件时间，不能把 12 全部归到代理核心或那次断网。当前仍缺少对应 `Killed process ... (CrashCore)` 的记录。更新后的判断是：**系统确实经历 OOM，内存压力是掉线的重要嫌疑；具体核心退出是否由 OOM 造成尚未逐次证实**。
+
+此前自动恢复修复解决退出后的清理与重试，尚未解决内存耗尽本身。本次补查没有修改设置、停止服务或重启。新的资源快照保存在私人工作目录，供后续核对。
+
+计数语义来源：[Linux 5.4 OOM killer](https://github.com/torvalds/linux/blob/v5.4/mm/oom_kill.c#L801-L836)、[vmstat 计数名称](https://github.com/torvalds/linux/blob/v5.4/mm/vmstat.c#L1141-L1143)。`GOMEMLIMIT` 的软限制语义见 [Go runtime 文档](https://pkg.go.dev/runtime#hdr-Environment_Variables)，不能把 12 MiB 参数当成整个进程的硬 RSS 上限。
